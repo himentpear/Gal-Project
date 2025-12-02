@@ -1,0 +1,475 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+    <meta charset="UTF-8">
+    <!-- 关键：添加 viewport-fit=cover 适配刘海屏，禁止缩放 -->
+    <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no, viewport-fit=cover">
+    <title>机制演示：手机强制横屏适配</title>
+    <style>
+        /* --- 0. 全局设置 --- */
+        @import url('https://fonts.googleapis.com/css2?family=Black+Ops+One&family=Noto+Sans+SC:wght@400;900&display=swap');
+
+        body, html {
+            margin: 0; padding: 0; width: 100%; height: 100%;
+            background: #000; overflow: hidden;
+            font-family: 'Noto Sans SC', sans-serif;
+            user-select: none; -webkit-user-select: none; /* 禁止选中文本 */
+            touch-action: none; /* 禁止默认触摸行为(如双击缩放) */
+            -webkit-tap-highlight-color: transparent; /* 移除点击高亮 */
+        }
+
+        /* --- 1. 游戏舞台 (核心适配逻辑) --- */
+        #stage {
+            position: absolute; top: 50%; left: 50%;
+            /* 默认居中 (PC/横屏手机) */
+            transform: translate(-50%, -50%);
+
+            /* 16:9 比例逻辑 */
+            width: 100vw; height: 56.25vw;
+            max-height: 100vh; max-width: 177.78vh;
+
+            overflow: hidden;
+            border: 2px solid #333;
+            box-shadow: 0 0 50px rgba(0,0,0,0.8);
+            background: repeating-linear-gradient(45deg, #111, #111 20px, #ffcc00 20px, #ffcc00 40px);
+        }
+
+        /* ★★★ 移动端竖屏强制横向显示 ★★★ */
+        @media screen and (orientation: portrait) {
+            #stage {
+                /* 交换宽高逻辑：宽度变成屏幕的高度 (vh)，高度变成宽度 (vw) */
+                width: 100vh;
+                height: 56.25vh; /* 保持 16:9，基准改为 vh */
+
+                /* 重新限制最大边界，防止溢出短边 */
+                max-width: none;
+                max-height: 100vw;
+
+                /* 旋转 90 度 */
+                transform: translate(-50%, -50%) rotate(90deg);
+            }
+        }
+
+        /* --- 镜头容器 --- */
+        #camera-rig {
+            position: absolute; top: 0; left: 0; width: 100%; height: 100%;
+            transform-origin: center center;
+            transition: transform 0.8s cubic-bezier(0.2, 0.8, 0.2, 1);
+            will-change: transform;
+            box-shadow: 0 0 30px rgba(0,0,0,0.8);
+        }
+        .tilt-left #camera-rig { transform: scale(1.1) rotate(-5deg); }
+        .tilt-right #camera-rig { transform: scale(1.1) rotate(7deg); }
+        .tilt-center #camera-rig { transform: scale(1) rotate(0deg); }
+
+        /* --- 背景层 (双图无缝滚动优化) --- */
+        #bg-layer {
+            position: absolute; width: 100%; height: 100%;
+            z-index: 1;
+            overflow: hidden;
+        }
+
+        /* 滚动轨道：宽度由内容撑开，不再限制为200% */
+        #bg-track {
+            display: flex;
+            width: max-content; /* 关键：允许宽度根据图片比例自动撑开 */
+            height: 100%;
+            /* 默认向左滚动：从 0 到 -50% (即移动其中一张图的宽度) */
+            animation: trackScrollLeft 40s linear infinite;
+        }
+
+        /* 单个背景图块 */
+        .bg-tile {
+            height: 100%; /* 高度填满屏幕 */
+            width: auto;  /* 宽度自适应 */
+
+            /* 关键：锁定图片原始宽高比 2610:718，防止变形或裁剪 */
+            aspect-ratio: 2610 / 718;
+
+            /* 防止 flex 布局压缩图片 */
+            flex-shrink: 0;
+
+            background-size: 100% 100%; /* 强制填满这个比例正确的容器 */
+            background-position: center;
+            background-repeat: no-repeat;
+        }
+
+        /* 觉醒模式：反向滚动，滤镜 */
+        .mode-solver #bg-track {
+            filter: contrast(1.2) brightness(0.9);
+            /* 反向滚动：从 -50% 到 0 */
+            animation: trackScrollRight 6s linear infinite;
+        }
+
+        @keyframes trackScrollLeft {
+            0% { transform: translateX(0); }
+            100% { transform: translateX(-50%); }
+        }
+        @keyframes trackScrollRight {
+            0% { transform: translateX(-50%); }
+            100% { transform: translateX(0); }
+        }
+
+        #grid-overlay {
+            position: absolute; top: 0; left: 0; width: 100%; height: 100%;
+            background: linear-gradient(rgba(0,255,255,0.05) 1px, transparent 1px), linear-gradient(90deg, rgba(0,255,255,0.05) 1px, transparent 1px);
+            background-size: 40px 40px; z-index: 2; pointer-events: none;
+        }
+
+        /* --- 立绘层 --- */
+        .char-wrapper { position: absolute; width: 100%; height: 100%; top: 0; left: 0; pointer-events: none; z-index: 10; }
+        .char-img {
+            position: absolute; height: 150%; width: auto; bottom: -50%;
+            transition: opacity 0.3s; filter: drop-shadow(5px 5px 15px rgba(0,0,0,0.6));
+            will-change: transform;
+        }
+        #char-right { right: -5%; transform-origin: bottom center; }
+        #char-left { left: -5%; transform: scaleX(-1); transform-origin: bottom center; }
+        .inactive { filter: brightness(0.4) grayscale(0.8) blur(2px); opacity: 0.8; }
+        .pan-active { animation: panMove 10s ease-in-out infinite alternate; }
+        @keyframes panMove { 0% { transform: translateX(0); } 100% { transform: translateX(6%); } }
+        .pan-active-left { animation: panMoveLeft 10s ease-in-out infinite alternate; }
+        @keyframes panMoveLeft { 0% { transform: scaleX(-1) translateX(0); } 100% { transform: scaleX(-1) translateX(-6%); } }
+
+        /* --- UI层 --- */
+        #ui-layer-root { position: absolute; top: 0; left: 0; width: 100%; height: 100%; z-index: 50; pointer-events: none; }
+        #dialogue-ui { position: absolute; bottom: 2%; left: 0; width: 100%; height: 28%; display: none; pointer-events: auto; overflow: visible !important; }
+
+        .struct-box {
+            position: absolute; bottom: 0; left: 5%; width: 90%; height: 100%;
+            background: rgba(0, 0, 0, 0.85); border: 2px solid #00ffff;
+            clip-path: polygon(0 0, 20% 0, 22% 10%, 100% 10%, 100% 85%, 98% 100%, 2% 100%, 0 85%);
+            box-shadow: inset 0 0 20px rgba(0, 255, 255, 0.1);
+        }
+        .name-tag {
+            position: absolute; top: 0; left: 5%; margin-top: -20px; margin-left: 20px;
+            background: #fff; color: #000; padding: 5px 40px 5px 20px;
+            font-weight: 900; font-size: 1.4rem; transform: skewX(-15deg);
+            border-left: 8px solid #ff0055; border-bottom: 2px solid #000;
+            z-index: 55; box-shadow: 5px 5px 0 rgba(0,0,0,0.5);
+        }
+        .dialogue-text {
+            position: relative; top: 15%; padding: 0 60px;
+            color: #fff; font-family: 'Noto Sans SC', monospace;
+            font-size: 1.5rem; line-height: 1.6;
+            text-shadow: 1px 1px 0 #000; font-weight: bold;
+        }
+        /* 移动端字体适配：竖屏模式下稍微放大字体，因为画面被旋转了 */
+        @media screen and (orientation: portrait) {
+            .dialogue-text { font-size: 1.3rem; padding: 0 30px; }
+            .art-text { font-size: 2.8rem; }
+        }
+
+        .cursor-blink { display: inline-block; width: 10px; height: 25px; background: #00ffff; animation: blink 1s infinite; vertical-align: middle; margin-left: 5px; }
+        @keyframes blink { 0%, 100% { opacity: 1; } 50% { opacity: 0; } }
+
+        #debate-ui { position: absolute; top: 0; left: 0; width: 100%; height: 100%; pointer-events: none; display: none; }
+        .floating-text-container {
+            position: absolute; top: 40%; left: 50%; transform: translate(-50%, -50%) rotate(-5deg);
+            width: 80%; text-align: center; pointer-events: auto;
+            animation: floatAnim 3s ease-in-out infinite;
+        }
+        .art-text {
+            font-family: 'Black Ops One', 'Noto Sans SC', sans-serif;
+            font-weight: 900; font-size: 3.5rem; color: #fff;
+            -webkit-text-stroke: 2px #ff0055; text-shadow: 4px 4px 0 #000; line-height: 1.3;
+        }
+        .weak-point {
+            color: #ffcc00; -webkit-text-stroke: 1.5px #000; text-shadow: 3px 3px 0 #000;
+            cursor: pointer; display: inline-block; border-bottom: 4px dashed #ff0055; transition: transform 0.1s;
+        }
+        .weak-point:hover { transform: scale(1.1) rotate(-2deg); color: #fff; border-bottom-style: solid; }
+        @keyframes floatAnim { 0%, 100% { transform: translate(-50%, -50%) rotate(-5deg) translateY(0); } 50% { transform: translate(-50%, -50%) rotate(-5deg) translateY(-10px); } }
+
+        #break-layer { position: absolute; top: 0; left: 0; width: 100%; height: 100%; z-index: 100; pointer-events: none; display: none; background: #fff; mix-blend-mode: exclusion; }
+        .break-word {
+            position: absolute; top: 50%; left: 50%; transform: translate(-50%, -50%) rotate(-15deg) scale(0);
+            font-family: 'Black Ops One', sans-serif; font-size: 15rem; color: #000; text-shadow: 10px 10px 0 #ff0055; opacity: 0;
+        }
+
+        .anim-shake { animation: shake 0.3s cubic-bezier(.36,.07,.19,.97) both; }
+        @keyframes shake {
+            0%, 100% { transform: translate(-50%, -50%); }
+            10%, 90% { transform: translate(calc(-50% - 2px), -50%); }
+            20%, 80% { transform: translate(calc(-50% + 4px), -50%); }
+            30%, 50%, 70% { transform: translate(calc(-50% - 4px), -50%); }
+            40%, 60% { transform: translate(calc(-50% + 4px), -50%); }
+        }
+
+        .flash-invert { animation: flashInvert 0.2s 3; }
+        @keyframes flashInvert { 0% { filter: invert(0); } 50% { filter: invert(1); } 100% { filter: invert(0); } }
+
+    </style>
+</head>
+<body>
+
+<div id="stage" class="tilt-center">
+    <div id="camera-rig">
+        <!-- 修改：使用双图无缝滚动结构 -->
+        <div id="bg-layer">
+            <div id="bg-track">
+                <div class="bg-tile"></div>
+                <div class="bg-tile"></div>
+            </div>
+        </div>
+        <div id="grid-overlay"></div>
+        <div class="char-wrapper">
+            <img id="char-left" class="char-img" src="" onerror="this.style.opacity=0">
+            <img id="char-right" class="char-img" src="" onerror="this.style.opacity=0">
+        </div>
+    </div>
+
+    <div id="ui-layer-root">
+        <div id="debate-ui"></div>
+        <div id="dialogue-ui">
+            <div class="name-tag">NAME</div>
+            <div class="struct-box">
+                <div class="dialogue-text"></div>
+            </div>
+        </div>
+    </div>
+
+    <div id="break-layer">
+        <div class="break-word">BREAK!!</div>
+    </div>
+</div>
+
+<script>
+    const CHARS = {
+        "xjc": { id: "xjc", side: "right", defaultPose: "stand" },
+        "yyc": { id: "yyc", side: "left", defaultPose: "stand" }
+    };
+
+    const SCRIPT = [
+        {
+            type: "normal",
+            char: "xjc", name: "Xiao Jingcha", emotion: "stonyfaced",
+            text: "Yang Yichen! The evidence is irrefutable!<br>You were the last one seen at the library!",
+            camera: "left"
+        },
+        {
+            type: "normal",
+            char: "yyc", name: "Yang Yichen", emotion: "sweat",
+            text: "Wait, Xiao... listen to me!<br>I wasn't even there at that time!",
+            camera: "right"
+        },
+        {
+            type: "debate",
+            char: "xjc", emotion: "stonyfaced",
+            text: "The book 'The Structure of Dreams' <br>disappeared at 21:15.",
+            camera: "left"
+        },
+        {
+            type: "debate",
+            char: "xjc", emotion: "angry",
+            text: "Surveillance shows you entering the West Wing at 21:00.",
+            camera: "left"
+        },
+        {
+            type: "debate",
+            char: "xjc", emotion: "smile",
+            text: "Since no one else entered, <br><span class='weak-point' onclick='triggerBreak(event)'>you must be the thief!</span>",
+            isWeakPoint: true,
+            camera: "left"
+        },
+        {
+            type: "normal",
+            char: "yyc", name: "Yang Yichen", emotion: "sweat",
+            text: "(I need to find the contradiction in her statement... <br>The time is key!)",
+            isThought: true,
+            camera: "center"
+        },
+        {
+            type: "debate", mode: "solver",
+            char: "yyc", emotion: "cool",
+            text: "OBJECTION!!",
+            shake: true,
+            camera: "right"
+        },
+        {
+            type: "debate", mode: "solver",
+            char: "yyc", emotion: "cool",
+            text: "The West Wing closes automatically at 21:00!",
+            camera: "right"
+        },
+        {
+            type: "debate", mode: "solver",
+            char: "yyc", emotion: "cool",
+            text: "If I entered at 21:00, I would be locked in, <br>not stealing books!",
+            camera: "right"
+        },
+        {
+            type: "normal", mode: "normal",
+            char: "xjc", name: "Xiao Jingcha", emotion: "astonished",
+            text: "W-what?! The automatic lock system...",
+            camera: "left"
+        },
+        {
+            type: "normal", mode: "normal",
+            char: "yyc", name: "Yang Yichen", emotion: "cool",
+            text: "Exactly. The logs must have been tampered with.",
+            camera: "right",
+            end: true
+        }
+    ];
+
+    let idx = 0;
+    const els = {
+        stage: document.getElementById('stage'),
+        cameraRig: document.getElementById('camera-rig'),
+        // bg 不再是单一背景，而是轨道
+        bgTrack: document.getElementById('bg-track'),
+        // 获取所有 bg-tile
+        bgTiles: document.querySelectorAll('.bg-tile'),
+        debateUI: document.getElementById('debate-ui'),
+        dialogueUI: document.getElementById('dialogue-ui'),
+        dialogueText: document.querySelector('.dialogue-text'),
+        nameTag: document.querySelector('.name-tag'),
+        charL: document.getElementById('char-left'),
+        charR: document.getElementById('char-right'),
+        breakLayer: document.getElementById('break-layer'),
+        breakWord: document.querySelector('.break-word')
+    };
+
+    window.onload = () => loadScene(0);
+
+    function getImgPath(charKey, emotion, isOpenMouth) {
+        const c = CHARS[charKey];
+        const mouth = isOpenMouth ? "openmouth" : "normal";
+        return `${c.id}-${mouth}-${c.defaultPose}-${emotion}.png`;
+    }
+
+    function setBgImage(url) {
+        // 同时设置两个背景块的图片
+        els.bgTiles.forEach(tile => {
+            tile.style.backgroundImage = `url('${url}')`;
+        });
+    }
+
+    function loadScene(index) {
+        if (index >= SCRIPT.length) return;
+        const data = SCRIPT[index];
+        idx = index;
+
+        els.stage.classList.remove('tilt-left', 'tilt-right', 'tilt-center');
+        if (data.camera === 'left') els.stage.classList.add('tilt-left');
+        else if (data.camera === 'right') els.stage.classList.add('tilt-right');
+        else els.stage.classList.add('tilt-center');
+
+        if (data.mode === 'solver') {
+            els.stage.classList.add('mode-solver');
+            setBgImage('bg_logic.png');
+        } else if (data.mode === 'normal') {
+            els.stage.classList.remove('mode-solver');
+            setBgImage('bg_court.png');
+        } else {
+            if (index === 0) setBgImage('bg_court.png');
+        }
+
+        if (data.type === 'debate') {
+            els.dialogueUI.style.display = 'none';
+            els.debateUI.style.display = 'block';
+            els.debateUI.innerHTML = '';
+
+            const container = document.createElement('div');
+            container.className = 'floating-text-container';
+            container.innerHTML = `<div class="art-text">${data.text}</div>`;
+
+            els.debateUI.onclick = (e) => {
+                if (e.target.classList.contains('weak-point')) return;
+                nextLine();
+            };
+            els.debateUI.appendChild(container);
+        } else {
+            els.debateUI.style.display = 'none';
+            els.dialogueUI.style.display = 'block';
+            els.nameTag.innerText = data.name;
+            typeWriter(data.text);
+            els.dialogueUI.onclick = () => nextLine();
+        }
+
+        updateSprites(data);
+
+        if (data.shake) {
+            els.stage.classList.add('anim-shake');
+            setTimeout(() => els.stage.classList.remove('anim-shake'), 500);
+        }
+    }
+
+    function nextLine() {
+        const data = SCRIPT[idx];
+        if (data.isThought) {
+            alert("请点击击破点！");
+            loadScene(idx - 1);
+            return;
+        }
+        loadScene(idx + 1);
+    }
+
+    function updateSprites(data) {
+        const target = CHARS[data.char].side === 'left' ? els.charL : els.charR;
+        const other = CHARS[data.char].side === 'left' ? els.charR : els.charL;
+
+        target.style.opacity = 1;
+        target.classList.remove('inactive');
+
+        if (CHARS[data.char].side === 'left') {
+            target.classList.add('pan-active-left');
+            target.classList.remove('pan-active');
+        } else {
+            target.classList.add('pan-active');
+            target.classList.remove('pan-active-left');
+        }
+
+        target.src = getImgPath(data.char, data.emotion, false);
+
+        if (window.mouthTimer) clearInterval(window.mouthTimer);
+        let toggle = false;
+        window.mouthTimer = setInterval(() => {
+            toggle = !toggle;
+            target.src = getImgPath(data.char, data.emotion, toggle);
+        }, 150);
+
+        other.classList.add('inactive');
+        other.classList.remove('pan-active', 'pan-active-left');
+    }
+
+    function typeWriter(text) {
+        els.dialogueText.innerHTML = "";
+        if (text.includes('<')) {
+            els.dialogueText.innerHTML = text + '<span class="cursor-blink"></span>';
+            return;
+        }
+        let i = 0;
+        if (window.typeTimer) clearInterval(window.typeTimer);
+        window.typeTimer = setInterval(() => {
+            els.dialogueText.textContent += text.charAt(i);
+            i++;
+            if (i >= text.length) {
+                clearInterval(window.typeTimer);
+                els.dialogueText.innerHTML += '<span class="cursor-blink"></span>';
+            }
+        }, 30);
+    }
+
+    window.triggerBreak = function(e) {
+        e.stopPropagation();
+        els.stage.classList.add('flash-invert');
+        els.breakLayer.style.display = 'block';
+        setTimeout(() => {
+            els.breakWord.style.opacity = 1;
+            els.breakWord.style.transform = "translate(-50%, -50%) rotate(-15deg) scale(1.2)";
+            els.breakWord.style.transition = "transform 0.2s cubic-bezier(0.1, 1.5, 0.2, 1)";
+        }, 50);
+
+        setTimeout(() => {
+            els.stage.classList.remove('flash-invert');
+            els.breakLayer.style.display = 'none';
+            els.breakWord.style.opacity = 0;
+            els.breakWord.style.transform = "translate(-50%, -50%) rotate(-15deg) scale(0)";
+            loadScene(4);
+        }, 1500);
+    }
+</script>
+</body>
+</html>
